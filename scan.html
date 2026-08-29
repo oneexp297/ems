@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR 스캔 — 비품 관리</title>
+<!--
+  비품 관리 시스템의 QR 스캐너.
+
+  왜 앱 밖에 따로 있나
+  ────────────────────
+  Apps Script 웹앱 화면은 googleusercontent.com 샌드박스 iframe 안에서 돈다.
+  카메라 권한은 상위 프레임이 allow="camera" 를 내려 줘야 하위 iframe 이 쓸 수 있는데,
+  그 상위 프레임은 구글이 만들고 우리가 고칠 수 없다. 그래서 아이폰에서는
+  권한 창조차 뜨지 않은 채 getUserMedia 가 거부된다.
+
+  이 페이지는 나스에서 top-level 로 열리므로 그 제약이 없다.
+  QR 을 읽으면 앱 주소로 되돌아가며 값을 넘긴다. 앱은 doGet 의 ?qr= 을 이미 처리한다
+  (폰 기본 카메라로 라벨을 찍었을 때와 똑같은 길이다).
+
+  주소
+  ────
+  https://giyatto.synology.me/aramhs/bipum/scan.html?ret=<앱 exec 주소>&kind=asset
+-->
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0b1020; --card:#141b2e; --line:#26304a;
+    --fg:#eef2ff; --dim:#9aa6c4; --accent:#3b82f6; --err:#f87171; --ok:#4ade80;
+  }
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    display:flex; flex-direction:column;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header{padding:14px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px}
+  header b{font-size:17px}
+  header span{color:var(--dim); font-size:13px}
+  main{flex:1; display:flex; flex-direction:column; padding:16px; gap:14px}
+
+  /* 뷰파인더 — 화면을 다 먹지 않게 상한을 둔다. 폰 세로에서 안내와 단추가 같이 보여야 한다. */
+  #reader{
+    width:100%; max-width:420px; margin:0 auto; aspect-ratio:1/1; max-height:46vh;
+    background:#000; border-radius:14px; overflow:hidden; border:1px solid var(--line);
+  }
+  #reader video{width:100%!important; height:100%!important; object-fit:cover}
+  #reader.off{display:none}
+
+  .msg{font-size:15px; line-height:1.55; text-align:center; min-height:1.5em}
+  .msg.err{color:var(--err)}
+  .msg.ok{color:var(--ok)}
+  .hint{color:var(--dim); font-size:13px; line-height:1.6; text-align:center}
+
+  .btns{margin-top:auto; display:flex; flex-direction:column; gap:10px}
+  button,a.btn{
+    display:block; width:100%; padding:15px; border-radius:12px; border:1px solid var(--line);
+    background:var(--card); color:var(--fg); font-size:16px; font-weight:600;
+    font-family:inherit; text-align:center; text-decoration:none; cursor:pointer;
+  }
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  button:disabled{opacity:.5}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<header>
+  <b>QR 스캔</b>
+  <span id="kind-label"></span>
+</header>
+
+<main>
+  <div id="reader"></div>
+  <p class="msg" id="msg">카메라를 켜는 중입니다…</p>
+  <p class="hint" id="hint">QR 이 네모 안에 꽉 차게 비춰 주세요.</p>
+
+  <div class="btns">
+    <button id="btn-photo">사진으로 스캔</button>
+    <button id="btn-retry" class="hidden">카메라 다시 시도</button>
+    <a class="btn" id="btn-back" href="#">앱으로 돌아가기</a>
+  </div>
+</main>
+
+<input type="file" id="file" accept="image/*" class="hidden">
+<div id="file-reader" style="position:absolute;left:-10000px;top:0;width:320px;height:320px"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* ---------- 돌아갈 주소 ----------
+     ret 을 그대로 믿고 이동하면 이 페이지가 공개 리디렉터가 된다.
+     (누가 ?ret=<피싱주소> 링크를 뿌리면 우리 도메인을 거쳐 넘어간다)
+     그래서 앱이 실제로 사는 곳만 허용한다. */
+  var APP_HOST = 'script.google.com';
+
+  function safeApp(u) {
+    try {
+      var a = new URL(String(u), location.href);
+      if (a.protocol !== 'https:' || a.hostname !== APP_HOST) return '';
+      if (a.pathname.indexOf('/macros/s/') !== 0) return '';
+      return a.href;
+    } catch (e) { return ''; }
+  }
+
+  var q    = new URLSearchParams(location.search);
+  var ret  = safeApp(q.get('ret') || '');
+  var kind = String(q.get('kind') || '');
+
+  $('kind-label').textContent = kind === 'asset' ? '비품' : (kind === 'user' ? '사용자' : '');
+  if (ret) $('btn-back').href = ret;
+  else {
+    $('btn-back').classList.add('hidden');
+    $('hint').textContent = '앱에서 열지 않아 돌아갈 주소를 모릅니다. 읽은 값만 보여 줍니다.';
+  }
+
+  /* ---------- 읽은 값을 앱으로 넘긴다 ----------
+     라벨 QR 은 대개 앱 주소 자체다(qrPayload_ 가 ?qr= 을 붙인 링크로 만든다).
+     그러면 그 주소로 그냥 가면 된다. 웹앱URL 을 아직 모르던 때 만든 라벨은
+     'ASSET:LAPTOP-001' 같은 코드만 들어 있어서, 돌아갈 주소에 붙여 준다. */
+  var done = false;
+
+  function deliver(text) {
+    if (done) return;
+    var raw = String(text || '').trim();
+    if (!raw) return;
+
+    var direct = safeApp(raw);                 // QR 자체가 앱 링크인 경우
+    var target = direct;
+
+    // 라벨 QR 은 예전에 만든 앱 링크라 왕복표(t)가 없다.
+    // 그대로 가면 앱이 로그인 화면으로 떨어질 수 있어, 들고 온 표를 옮겨 준다.
+    if (direct && ret) {
+      try {
+        var t = new URL(ret).searchParams.get('t');
+        var d = new URL(direct);
+        if (t && !d.searchParams.get('t')) {
+          d.searchParams.set('t', t);
+          target = d.href;
+        }
+      } catch (e) { /* 그냥 원래 링크로 간다 */ }
+    }
+
+    if (!target) {
+      if (!/^[A-Za-z0-9:_-]{1,64}$/.test(raw)) {   // 서버 qrParam_ 과 같은 규칙
+        return say('이 앱의 QR 이 아닙니다. 비품 라벨을 비춰 주세요.', 'err');
+      }
+      if (!ret) return say('읽었습니다: ' + raw, 'ok');
+      target = ret + (ret.indexOf('?') < 0 ? '?' : '&') + 'qr=' + encodeURIComponent(raw);
+    }
+
+    done = true;
+    say('읽었습니다. 앱으로 돌아갑니다…', 'ok');
+    stop();
+    location.replace(target);
+  }
+
+  function say(t, cls) { var m = $('msg'); m.textContent = t; m.className = 'msg' + (cls ? ' ' + cls : ''); }
+
+  /* ---------- 카메라 ---------- */
+  var sc = null;
+
+  function stop() {
+    if (!sc) return;
+    var s = sc; sc = null;
+    try { s.stop().then(function () { try { s.clear(); } catch (e) {} })
+                  .catch(function () { try { s.clear(); } catch (e) {} }); }
+    catch (e) { try { s.clear(); } catch (e2) {} }
+  }
+
+  function start() {
+    if (typeof Html5Qrcode === 'undefined') return failed('스캐너를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.');
+
+    $('reader').classList.remove('off');
+    $('btn-retry').classList.add('hidden');
+    say('카메라를 켜는 중입니다…');
+
+    try {
+      sc = new Html5Qrcode('reader', { verbose: false });
+      sc.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: function (w, h) { var e = Math.floor(Math.min(w, h) * 0.7); return { width: e, height: e }; } },
+        deliver,
+        function () { /* 인식 실패 프레임은 무시 */ }
+      ).then(function () { say('QR 을 비춰 주세요.'); })
+       .catch(function (e) { failed('카메라를 열 수 없습니다.' + (e && e.message ? ' (' + e.message + ')' : '')); });
+    } catch (e) {
+      failed('카메라를 열 수 없습니다.');
+    }
+  }
+
+  function failed(m) {
+    sc = null;
+    $('reader').classList.add('off');
+    say(m + ' 아래 "사진으로 스캔" 으로 한 장 찍어 주세요.', 'err');
+    $('btn-retry').classList.remove('hidden');
+  }
+
+  /* ---------- 사진 한 장에서 읽기 (카메라가 안 될 때) ---------- */
+  $('btn-photo').onclick = function () {
+    var f = $('file');
+    f.value = '';
+    f.onchange = function () {
+      var file = f.files && f.files[0];
+      if (!file) return;
+      say('사진에서 QR 을 읽는 중입니다…');
+      decode(file, function (t) {
+        if (t) return deliver(t);
+        say('QR 을 읽지 못했습니다. 코드가 사진에 꽉 차게 다시 찍어 주세요.', 'err');
+      });
+    };
+    f.click();
+  };
+
+  $('btn-retry').onclick = function () { stop(); start(); };
+
+  /* 폰 원본 사진은 4000px 이 넘어 디코더가 자주 실패한다. 줄인 것부터 본다. */
+  function decode(file, cb) {
+    shrink(file, function (small) {
+      var tries = small ? [small, file] : [file];
+      (function next(i) {
+        if (i >= tries.length) return cb(null);
+        one(tries[i], function (t) { t ? cb(t) : next(i + 1); });
+      })(0);
+    });
+  }
+
+  function one(file, cb) {
+    if (typeof BarcodeDetector !== 'undefined' && typeof createImageBitmap !== 'undefined') {
+      try {
+        return createImageBitmap(file).then(function (bmp) {
+          return new BarcodeDetector({ formats: ['qr_code'] }).detect(bmp).then(function (codes) {
+            if (bmp.close) bmp.close();
+            codes && codes.length ? cb(codes[0].rawValue) : lib(file, cb);
+          });
+        }).catch(function () { lib(file, cb); });
+      } catch (e) { /* 아래로 */ }
+    }
+    lib(file, cb);
+  }
+
+  function lib(file, cb) {
+    if (typeof Html5Qrcode === 'undefined' || !(file instanceof File)) return cb(null);
+    var r;
+    try { r = new Html5Qrcode('file-reader', { verbose: false }); } catch (e) { return cb(null); }
+    function fin(t) { try { r.clear(); } catch (e) {} cb(t || null); }
+    try { r.scanFile(file, false).then(fin).catch(function () { fin(null); }); }
+    catch (e) { fin(null); }
+  }
+
+  var MAX_EDGE = 1600;
+  function shrink(file, cb) {
+    var fr = new FileReader();
+    fr.onerror = function () { cb(null); };
+    fr.onload = function () {
+      var img = new Image();
+      img.onerror = function () { cb(null); };
+      img.onload = function () {
+        var s = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+        if (s >= 1) return cb(null);
+        var c = document.createElement('canvas');
+        c.width = Math.round(img.width * s);
+        c.height = Math.round(img.height * s);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        try {
+          c.toBlob(function (b) {
+            cb(b ? new File([b], 'qr.jpg', { type: 'image/jpeg' }) : null);
+          }, 'image/jpeg', 0.92);
+        } catch (e) { cb(null); }
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  }
+
+  window.addEventListener('pagehide', stop);
+  start();
+})();
+</script>
+</body>
+</html>
