@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>한나노텍 비품 관리</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#007DBD">
+
+  <!--
+    왜 이 껍데기가 있나
+    ──────────────────
+    앱 주소(script.google.com/…/exec)를 바로 열면 그 페이지는 구글이 만든다.
+    구글 페이지가 우리 HTML 을 googleusercontent iframe 으로 품는데,
+    그 iframe 이 보통 흐름에 height:100% 로 놓여 있다.
+
+    홈 화면 앱(standalone)에서는 그 높이가 실제로 보이는 높이와 어긋난다
+    (주소창이 없고 안전영역이 다르다). iOS 가 그 틈을 맞추려고 iframe 을
+    통째로 한 겹 더 그려서 늘리는데, 늘린 그림이라 글자가 번진다.
+    색이나 blur 문제가 아니다.
+
+    그 CSS 는 구글 페이지에 있어 우리가 고칠 수 없다. 그래서 래퍼를 우리 것으로
+    바꾸고, iframe 을 position:fixed 로 화면에 그대로 붙인다. 늘릴 일이 없어진다.
+
+    앱 쪽은 doGet 이 XFrameOptionsMode.ALLOWALL 이어야 이 안에 들어온다.
+  -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="비품 관리">
+
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+
+  <style>
+    /* 핵심 두 줄. 바깥은 스크롤을 두지 않고, iframe 을 화면에 그대로 붙인다.
+       실제 스크롤은 앱 안쪽이 맡는다. */
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #007DBD; }
+    iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+
+    /* 상태표시줄 뒤를 브랜드 파랑으로 채운다. black-translucent 라 페이지가 그 뒤까지 올라온다. */
+    #bar { position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top);
+           background: #007DBD; z-index: 3; }
+
+    /* 구글 쪽이 깨어나는 데 몇 초 걸린다. 흰 화면만 있으면 고장 난 줄 안다.
+       iframe 이 fixed 라 쌓임 순서가 바뀐다 — 덮개는 그보다 위에 둔다. */
+    #boot { position: fixed; inset: 0; z-index: 2; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 16px;
+            background: #007DBD; color: rgba(255,255,255,.9);
+            font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+            font-size: 14px; transition: opacity .25s; }
+    #boot.gone { opacity: 0; pointer-events: none; }
+    #boot .mark { font-size: 56px; font-weight: 800; letter-spacing: -.04em; color: #fff; line-height: 1; }
+    #boot .sp { width: 26px; height: 26px; border: 3px solid rgba(255,255,255,.35);
+                border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg) } }
+  </style>
+</head>
+<body>
+
+<div id="bar"></div>
+<div id="boot">
+  <div class="mark">H</div>
+  <div class="sp"></div>
+  <div id="bootMsg">불러오는 중…</div>
+</div>
+
+<iframe id="app" title="비품 관리 시스템" allow="clipboard-read; clipboard-write"></iframe>
+
+<script>
+  // 사람들이 쓰는 배포 주소. clasp push 뒤 deploy -i 로 같은 id 의 버전만 올린다.
+  var APP_URL = 'https://script.google.com/macros/s/AKfycbz-CEjZ9K773OzH4H5SdkQGRlJWfwCloLU4KmQP8LZtfK5pcIFR8WmhixvXuRjTaTa2/exec';
+
+  var q = new URLSearchParams(location.search || '');
+
+  // 이 껍데기 주소를 앱에 알려 준다. 스캐너에 다녀올 때 여기로 돌아와야
+  // 상단이 다시 구글 페이지가 되지 않는다.
+  q.set('wrap', location.origin + location.pathname);
+
+  var f = document.getElementById('app');
+  var booted = false;
+
+  function bootDone() {
+    if (booted) return;
+    booted = true;
+    var b = document.getElementById('boot');
+    if (b) { b.classList.add('gone'); setTimeout(function () { b.remove(); }, 300); }
+  }
+
+  window.addEventListener('message', function (e) {
+    if (e.origin !== 'https://script.google.com' &&
+        e.origin.indexOf('.googleusercontent.com') < 0) return;
+    if (e && e.data && e.data.type === 'bipum-ready') bootDone();
+  });
+
+  f.addEventListener('load', function () { setTimeout(bootDone, 2500); });
+  setTimeout(bootDone, 15000);   // iframe 이 아예 안 뜨는 때를 위한 마지막 보루
+
+  f.src = APP_URL + '?' + q.toString();
+
+  // 주소에 실려 온 표(t)·QR 값은 앱에 넘긴 뒤 지운다.
+  // 홈 화면 아이콘은 '추가' 하는 순간의 주소가 굳으므로, 지금 아이콘을 만들어도
+  // 옛 표가 함께 굳지 않게 한다.
+  if (q.get('t') || q.get('qr')) {
+    try { history.replaceState(null, '', location.pathname); } catch (err) {}
+  }
+</script>
+</body>
+</html>

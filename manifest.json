@@ -1,0 +1,10 @@
+{
+  "name": "한나노텍 비품 관리",
+  "short_name": "비품 관리",
+  "scope": ".",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#007DBD",
+  "theme_color": "#007DBD",
+  "lang": "ko"
+}
