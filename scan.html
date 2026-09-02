@@ -213,33 +213,54 @@
     catch (e) { try { s.clear(); } catch (e2) {} }
   }
 
+  // 멀리서도 읽히려면 해상도가 높아야 한다. 그런데 기기·브라우저에 따라 그 조합을
+  // 통째로 거부해서 **카메라가 아예 안 열리는** 곳이 있다(2026-09-02 갤럭시에서 겪음).
+  // 그래서 높은 쪽부터 차례로 해 보고, 안 되면 예전 방식으로 물러선다.
+  // 마지막 칸은 예전에 쓰던 그대로다 — 여기까지 오면 최소한 예전만큼은 된다.
+  var CAMS = [
+    { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+    { facingMode: 'environment', width: { ideal: 1280 } },
+    { facingMode: 'environment' }
+  ];
+
+  function errText(e) { return e ? String(e.message || e.name || e) : ''; }
+
   function start() {
     if (typeof Html5Qrcode === 'undefined') return failed('스캐너를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.');
 
     $('reader').classList.remove('off');
     $('btn-retry').classList.add('hidden');
     say('카메라를 켜는 중입니다…');
+    tryCam(0);
+  }
 
+  function tryCam(i) {
     try {
-      sc = new Html5Qrcode('reader', { verbose: false });
+      // 내장 BarcodeDetector 는 멀거나 흐릿한 QR 을 훨씬 잘 읽는다.
+      // 이 옵션은 start() 가 아니라 **생성자**에 넣어야 한다. start() 에 넣었다가 한 번 당했다.
+      sc = new Html5Qrcode('reader', {
+        verbose: false,
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+      });
       sc.start(
-        // 멀리서도 읽히게 하는 것은 세 가지다 (2026-09-02).
-        //  1) 해상도 — 기본값은 640 언저리라 조금만 멀어져도 QR 칸이 뭉개진다. 1920 을 청한다
-        //  2) 읽는 네모(qrbox) — 이 안쪽만 잘라서 본다. 작으면 QR 이 그 안을 채울 만큼 다가가야 한다
-        //  3) 브라우저에 내장된 BarcodeDetector — 있으면 그쪽이 훨씬 멀리·흐릿해도 읽는다
-        { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-        {
-          fps: 10,
-          qrbox: function (w, h) { var e = Math.floor(Math.min(w, h) * 0.92); return { width: e, height: e }; },
-          experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-        },
+        CAMS[i],
+        { fps: 10, qrbox: function (w, h) { var e = Math.floor(Math.min(w, h) * 0.92); return { width: e, height: e }; } },
         deliver,
         function () { /* 인식 실패 프레임은 무시 */ }
       ).then(function () { say('QR 을 비춰 주세요.'); })
-       .catch(function (e) { failed('카메라를 열 수 없습니다.' + (e && e.message ? ' (' + e.message + ')' : '')); });
+       .catch(function (e) { nextCam(i, e); });
     } catch (e) {
-      failed('카메라를 열 수 없습니다.');
+      nextCam(i, e);
     }
+  }
+
+  /** 이 조합으로 안 열렸다. 다음 조합으로 넘어가고, 다 떨어지면 안내한다. */
+  function nextCam(i, e) {
+    var s = sc; sc = null;
+    if (s) { try { s.clear(); } catch (e2) {} }
+    if (i + 1 < CAMS.length) return tryCam(i + 1);
+    var t = errText(e);
+    failed('카메라를 열 수 없습니다.' + (t ? ' (' + t + ')' : ''));
   }
 
   function failed(m) {
