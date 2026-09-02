@@ -93,10 +93,55 @@
     if (e && e.data && e.data.type === 'bipum-ready') bootDone();
   });
 
-  f.addEventListener('load', function () { setTimeout(bootDone, 2500); });
-  setTimeout(bootDone, 15000);   // iframe 이 아예 안 뜨는 때를 위한 마지막 보루
+  // 덮개를 걷는 신호는 앱이 보내는 bipum-ready 하나다.
+  //
+  // 예전에는 iframe 의 load + 2.5초로도 걷었는데, 그 load 는 **구글 페이지**가 뜬 것이지
+  // 우리 앱이 그려진 것이 아니다. 구글 쪽이 깨어나는 데 10초가 넘게 걸리는 날이 있어,
+  // 덮개만 먼저 걷히고 파란 빈 화면을 한참 보게 됐다. 고장으로 읽힌다.
+  //
+  // 그래서 load 는 신호로 쓰지 않는다. 기다리는 동안 문구만 바꾸고,
+  // 끝내 안 오면 아래에서 계정을 바꿔 한 번 더 해 본 뒤 안내를 띄운다.
+  var msg = document.getElementById('bootMsg');
+  function tell(t) { if (msg && !booted) msg.textContent = t; }
+  setTimeout(function () { tell('구글 서버를 깨우는 중입니다…'); }, 4000);
+  setTimeout(function () { tell('조금만 더 기다려 주세요…'); }, 10000);
 
-  f.src = APP_URL + '?' + q.toString();
+  var baseSrc = APP_URL + '?' + q.toString();
+  f.src = baseSrc;
+
+  /* ---------- 앱이 끝내 안 뜰 때 ----------
+     크롬에 구글 계정이 여러 개 로그인돼 있으면 /macros/s/ 주소가 엉뚱한 계정으로 붙어
+     구글 컨테이너가 "현재 파일을 열 수 없습니다" 를 대신 그린다(2026-09-02, 안드로이드에서 확인).
+     시크릿 창에서는 로그인이 없어 그냥 열린다 — 앱이나 배포 문제가 아니다.
+
+     우리가 안에서 무엇이 그려졌는지 읽을 수는 없다(다른 출처). 그래서 신호가 안 오는 것으로만 안다.
+     한 번은 계정을 지정해 다시 해 보고, 그래도 안 오면 사람이 할 수 있는 것을 보여 준다. */
+  var retried = false;
+  setTimeout(function () {
+    if (booted || retried) return;
+    retried = true;
+    tell('다른 구글 계정으로 다시 열어 봅니다…');
+    f.src = baseSrc + '&authuser=0';
+  }, 18000);
+
+  setTimeout(function () {
+    if (booted) return;
+    var b = document.getElementById('boot');
+    if (!b) return;
+    b.innerHTML =
+      '<div class="mark">H</div>' +
+      '<div style="max-width:22em;line-height:1.7;text-align:center;padding:0 24px">' +
+      '<b>앱을 여는 데 실패했습니다.</b><br>' +
+      '이 브라우저에 구글 계정이 여러 개 로그인돼 있으면 생기는 일입니다. ' +
+      '아래로 열거나, 시크릿 창에서 열어 보세요.</div>' +
+      '<a id="direct" style="display:inline-block;margin-top:4px;padding:13px 22px;border-radius:12px;' +
+      'background:#fff;color:#007DBD;font-weight:700;text-decoration:none">새 탭에서 바로 열기</a>' +
+      '<a id="again" style="margin-top:2px;color:rgba(255,255,255,.85);font-size:13px;text-decoration:underline">다시 시도</a>';
+    var d = document.getElementById('direct');
+    if (d) { d.href = baseSrc; d.target = '_blank'; d.rel = 'noopener'; }
+    var a = document.getElementById('again');
+    if (a) a.onclick = function () { location.reload(); };
+  }, 32000);
 
   // 주소에 실려 온 표(t)·QR 값은 앱에 넘긴 뒤 지운다.
   // 홈 화면 아이콘은 '추가' 하는 순간의 주소가 굳으므로, 지금 아이콘을 만들어도

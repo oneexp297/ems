@@ -14,13 +14,14 @@
   그 상위 프레임은 구글이 만들고 우리가 고칠 수 없다. 그래서 아이폰에서는
   권한 창조차 뜨지 않은 채 getUserMedia 가 거부된다.
 
-  이 페이지는 나스에서 top-level 로 열리므로 그 제약이 없다.
+  이 페이지는 GitHub Pages 에서 top-level 로 열리므로 그 제약이 없다.
   QR 을 읽으면 앱 주소로 되돌아가며 값을 넘긴다. 앱은 doGet 의 ?qr= 을 이미 처리한다
   (폰 기본 카메라로 라벨을 찍었을 때와 똑같은 길이다).
 
   주소
   ────
-  https://giyatto.synology.me/aramhs/bipum/scan.html?ret=<앱 exec 주소>&kind=asset
+  https://oneexp297.github.io/ems/scan.html?ret=<돌아갈 주소>&kind=asset
+  ret 은 앱 주소(script.google.com/macros/s/...) 또는 래퍼(oneexp297.github.io/ems/) 다.
 -->
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -94,10 +95,19 @@
   /* ---------- 돌아갈 주소 ----------
      ret 을 그대로 믿고 이동하면 이 페이지가 공개 리디렉터가 된다.
      (누가 ?ret=<피싱주소> 링크를 뿌리면 우리 도메인을 거쳐 넘어간다)
-     그래서 앱이 실제로 사는 곳만 허용한다. */
-  var APP_HOST = 'script.google.com';
+     그래서 우리가 아는 두 자리(앱 주소 · 래퍼)만 허용한다. */
+  var APP_HOST  = 'script.google.com';
+  // 홈 화면 앱이 쓰는 우리 래퍼. 여기로 들어온 사람은 여기로 돌려보내야 한다 —
+  // 구글 주소로 떨어뜨리면 상단이 다시 구글 페이지가 되어 글자 번짐이 돌아온다.
+  // 래퍼는 받은 ?qr= · ?t= 를 그대로 iframe 에 넘겨 준다.
+  var WRAP_HOST = 'oneexp297.github.io';
+  var WRAP_PATH = '/ems/';
 
+  /** QR 에 박혀 있는 앱 링크인가 */
   function safeApp(u) {
+    // 빈 값을 넘기면 new URL('', location.href) 가 '지금 이 페이지' 로 풀린다.
+    // 래퍼 검사를 더한 뒤로는 scan.html 자신이 /ems/ 안이라 그대로 통과해 버린다.
+    if (!u) return '';
     try {
       var a = new URL(String(u), location.href);
       if (a.protocol !== 'https:' || a.hostname !== APP_HOST) return '';
@@ -106,8 +116,21 @@
     } catch (e) { return ''; }
   }
 
+  /** 돌아가도 되는 주소인가. 아는 두 자리만 받는다(공개 리디렉터 방지). */
+  function safeRet(u) {
+    if (!u) return '';
+    var direct = safeApp(u);
+    if (direct) return direct;
+    try {
+      var a = new URL(String(u), location.href);
+      if (a.protocol !== 'https:' || a.hostname !== WRAP_HOST) return '';
+      if (a.pathname.indexOf(WRAP_PATH) !== 0) return '';
+      return a.href;
+    } catch (e) { return ''; }
+  }
+
   var q    = new URLSearchParams(location.search);
-  var ret  = safeApp(q.get('ret') || '');
+  var ret  = safeRet(q.get('ret') || '');
   var kind = String(q.get('kind') || '');
 
   $('kind-label').textContent = kind === 'asset' ? '비품' : (kind === 'user' ? '사용자' : '');
@@ -119,39 +142,58 @@
 
   /* ---------- 읽은 값을 앱으로 넘긴다 ----------
      라벨 QR 은 대개 앱 주소 자체다(qrPayload_ 가 ?qr= 을 붙인 링크로 만든다).
-     그러면 그 주소로 그냥 가면 된다. 웹앱URL 을 아직 모르던 때 만든 라벨은
-     'ASSET:LAPTOP-001' 같은 코드만 들어 있어서, 돌아갈 주소에 붙여 준다. */
+     그렇다고 그 주소로 곧장 가면 세 가지가 어긋난다.
+
+       · 래퍼로 들어온 사람이 구글 주소로 떨어진다 (글자 번짐이 돌아온다)
+       · 들고 온 왕복표(t)를 잃어 로그인이 풀린다 — 라벨은 표를 모른다
+       · 옛 배포 때 인쇄한 라벨이면 몇 달 전 화면으로 간다
+
+     그래서 링크에서 코드만 뽑아, 우리가 들어온 자리(ret)에 붙여 돌아간다.
+     ret 이 래퍼면 래퍼로, 앱 주소면 앱 주소로 간다. 표도 ret 에 실린 채 그대로 간다. */
   var done = false;
+  var CODE_RE = /^[A-Za-z0-9:_-]{1,64}$/;   // 서버 qrParam_ 과 같은 규칙
+
+  /** 읽은 값에서 코드만 뽑는다. 앱 링크면 그 안의 ?qr=, 아니면 값 자체. */
+  function codeOf(raw) {
+    var direct = safeApp(raw);
+    if (direct) {
+      try { return new URL(direct).searchParams.get('qr') || ''; } catch (e) { return ''; }
+    }
+    return CODE_RE.test(raw) ? raw : '';
+  }
+
+  /** base 에 ?qr= 을 붙인다. base 에 이미 있는 값(t 등)은 건드리지 않는다. */
+  function withCode(base, code) {
+    try {
+      var u = new URL(base);
+      u.searchParams.set('qr', code);
+      return u.href;
+    } catch (e) {
+      return base + (base.indexOf('?') < 0 ? '?' : '&') + 'qr=' + encodeURIComponent(code);
+    }
+  }
 
   function deliver(text) {
     if (done) return;
     var raw = String(text || '').trim();
     if (!raw) return;
 
-    var direct = safeApp(raw);                 // QR 자체가 앱 링크인 경우
-    var target = direct;
+    var direct = safeApp(raw);          // QR 자체가 앱 링크인가
+    var code   = codeOf(raw);
+    var base   = ret || direct;         // 들어온 자리가 있으면 그쪽이 이긴다
 
-    // 라벨 QR 은 예전에 만든 앱 링크라 왕복표(t)가 없다.
-    // 그대로 가면 앱이 로그인 화면으로 떨어질 수 있어, 들고 온 표를 옮겨 준다.
-    if (direct && ret) {
-      try {
-        var t = new URL(ret).searchParams.get('t');
-        var d = new URL(direct);
-        if (t && !d.searchParams.get('t')) {
-          d.searchParams.set('t', t);
-          target = d.href;
-        }
-      } catch (e) { /* 그냥 원래 링크로 간다 */ }
+    if (!code) {
+      // 앱 링크인데 코드가 안 들어 있으면(그냥 앱 주소) 갈 곳은 있다.
+      // 그 외에는 우리 QR 이 아니다 — ret 이 있다고 그냥 돌아가면 아무 QR 이나 통과한다.
+      if (direct) return go(base);
+      return say('이 앱의 QR 이 아닙니다. 비품 라벨을 비춰 주세요.', 'err');
     }
 
-    if (!target) {
-      if (!/^[A-Za-z0-9:_-]{1,64}$/.test(raw)) {   // 서버 qrParam_ 과 같은 규칙
-        return say('이 앱의 QR 이 아닙니다. 비품 라벨을 비춰 주세요.', 'err');
-      }
-      if (!ret) return say('읽었습니다: ' + raw, 'ok');
-      target = ret + (ret.indexOf('?') < 0 ? '?' : '&') + 'qr=' + encodeURIComponent(raw);
-    }
+    if (!base) return say('읽었습니다: ' + code, 'ok');
+    go(withCode(base, code));
+  }
 
+  function go(target) {
     done = true;
     say('읽었습니다. 앱으로 돌아갑니다…', 'ok');
     stop();
