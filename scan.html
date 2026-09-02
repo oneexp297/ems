@@ -223,8 +223,16 @@
     try {
       sc = new Html5Qrcode('reader', { verbose: false });
       sc.start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: function (w, h) { var e = Math.floor(Math.min(w, h) * 0.7); return { width: e, height: e }; } },
+        // 멀리서도 읽히게 하는 것은 세 가지다 (2026-09-02).
+        //  1) 해상도 — 기본값은 640 언저리라 조금만 멀어져도 QR 칸이 뭉개진다. 1920 을 청한다
+        //  2) 읽는 네모(qrbox) — 이 안쪽만 잘라서 본다. 작으면 QR 이 그 안을 채울 만큼 다가가야 한다
+        //  3) 브라우저에 내장된 BarcodeDetector — 있으면 그쪽이 훨씬 멀리·흐릿해도 읽는다
+        { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+        {
+          fps: 10,
+          qrbox: function (w, h) { var e = Math.floor(Math.min(w, h) * 0.92); return { width: e, height: e }; },
+          experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+        },
         deliver,
         function () { /* 인식 실패 프레임은 무시 */ }
       ).then(function () { say('QR 을 비춰 주세요.'); })

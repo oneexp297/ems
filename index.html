@@ -116,13 +116,18 @@
 
      우리가 안에서 무엇이 그려졌는지 읽을 수는 없다(다른 출처). 그래서 신호가 안 오는 것으로만 안다.
      한 번은 계정을 지정해 다시 해 보고, 그래도 안 오면 사람이 할 수 있는 것을 보여 준다. */
-  var retried = false;
-  setTimeout(function () {
-    if (booted || retried) return;
-    retried = true;
-    tell('다른 구글 계정으로 다시 열어 봅니다…');
-    f.src = baseSrc + '&authuser=0';
-  }, 18000);
+  // 어느 자리(authuser)가 맞는지는 기기·계정 순서마다 다르다. 두 번까지 바꿔 가며 해 본다.
+  // 로그아웃하지 않고 넘어갈 수 있는 유일한 길이라 자동으로 시도한다.
+  var tries = ['&authuser=0', '&authuser=1'];
+  function retryAt(i, ms) {
+    setTimeout(function () {
+      if (booted || i >= tries.length) return;
+      tell('다른 구글 계정으로 다시 열어 봅니다…');
+      f.src = baseSrc + tries[i];
+    }, ms);
+  }
+  retryAt(0, 15000);
+  retryAt(1, 24000);
 
   setTimeout(function () {
     if (booted) return;
@@ -141,7 +146,7 @@
     if (d) { d.href = baseSrc; d.target = '_blank'; d.rel = 'noopener'; }
     var a = document.getElementById('again');
     if (a) a.onclick = function () { location.reload(); };
-  }, 32000);
+  }, 33000);
 
   // 주소에 실려 온 표(t)·QR 값은 앱에 넘긴 뒤 지운다.
   // 홈 화면 아이콘은 '추가' 하는 순간의 주소가 굳으므로, 지금 아이콘을 만들어도
