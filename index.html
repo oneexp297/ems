@@ -88,50 +88,125 @@
     if (b) { b.classList.add('gone'); setTimeout(function () { b.remove(); }, 300); }
   }
 
+  /* ---------- 앱이 안 뜰 때: 쿠키 없이 다시 연다 ----------
+     크롬에 구글 계정이 여러 개 로그인돼 있으면 /macros/s/ 주소가 엉뚱한 계정으로 붙어
+     구글이 "현재 파일을 열 수 없습니다" 를 대신 그린다. 시크릿 창에서는 열린다 — 앱 문제가 아니다.
+
+     예전에는 15초·24초에 authuser=0/1 로 바꿔 보고 33초에 실패 안내를 띄웠다. 계정 순서에 따라
+     둘 다 틀려서 30초 넘게 기다린 끝에 실패만 봤다(2026-09-14, PC 크롬).
+
+     이제는 **credentialless iframe**(쿠키를 안 보냄 = 시크릿 창과 같은 상태)으로 한 번 더 연다.
+     앱은 익명 공개 배포라 로그인 없이 뜬다. 판정도 빠르게 한다 — 앱은 스크립트가 돌자마자
+     bipum-alive 를 보내므로, 구글 페이지 load 뒤 3초 안에 그것이 없으면 실패로 본다.
+
+     대가: credentialless 안의 저장소는 창을 닫으면 지워져 **매번 로그인**해야 한다. 그래서 처음부터
+     쓰지 않고 실패했을 때만 쓴다. 한 번 필요했던 브라우저는 7일간 기억해 곧바로 그 길로 연다. */
+  var CL_KEY = 'bipumCredentialless';
+  var clSupported = 'credentialless' in HTMLIFrameElement.prototype;
+  var attempt = 0, alive = false, usedCl = false, startedAt = 0;
+
+  function clRemembered() {
+    try { var v = Number(localStorage.getItem(CL_KEY)); return v > 0 && Date.now() - v < 7 * 864e5; }
+    catch (err) { return false; }
+  }
+
   window.addEventListener('message', function (e) {
     if (e.origin !== 'https://script.google.com' &&
         e.origin.indexOf('.googleusercontent.com') < 0) return;
-    if (e && e.data && e.data.type === 'bipum-ready') bootDone();
+    var type = e && e.data && e.data.type;
+    if (type === 'bipum-alive' || type === 'bipum-ready') alive = true;
+    if (type === 'bipum-alive' && e.ports && e.ports[0]) linkApp(e.ports[0]);
+    if (type === 'bipum-ready') {
+      // 쿠키 없이 **빨리** 떴을 때만 기억한다. 느리게 떴다면 첫 시도도 그저 느렸던 것일 수 있다 —
+      // 잘못 기억하면 7일 동안 매번 로그인해야 한다.
+      if (usedCl && Date.now() - startedAt < 8000) { try { localStorage.setItem(CL_KEY, String(Date.now())); } catch (err) {} }
+      bootDone();
+    }
   });
 
-  // 덮개를 걷는 신호는 앱이 보내는 bipum-ready 하나다.
-  //
-  // 예전에는 iframe 의 load + 2.5초로도 걷었는데, 그 load 는 **구글 페이지**가 뜬 것이지
-  // 우리 앱이 그려진 것이 아니다. 구글 쪽이 깨어나는 데 10초가 넘게 걸리는 날이 있어,
-  // 덮개만 먼저 걷히고 파란 빈 화면을 한참 보게 됐다. 고장으로 읽힌다.
-  //
-  // 그래서 load 는 신호로 쓰지 않는다. 기다리는 동안 문구만 바꾸고,
-  // 끝내 안 오면 아래에서 계정을 바꿔 한 번 더 해 본 뒤 안내를 띄운다.
+  /* ---------- 스캐너를 이 페이지 위에 겹쳐 띄운다 ----------
+     예전에는 앱이 top 을 scan.html 로 옮겼다가 ?qr= 로 돌아왔다. 돌아올 때마다 이 래퍼가 앱을
+     처음부터 다시 불러, 파란 로딩 화면이 3~6초 떴다(2026-09-14).
+     이 페이지는 top-level 이라 카메라를 쓸 수 있다. scan.html 을 iframe 으로 겹쳐 열고, 읽은 코드만
+     앱에 건넨다. 앱 문서는 구글 iframe 두 겹 안이라 직접 닿지 않으므로, 앱이 bipum-alive 에 실어
+     보낸 MessagePort 로 주고받는다. 이 포트가 없는 옛 앱은 예전 길(밖 스캐너)을 그대로 쓴다. */
+  var appPort = null, scanFrame = null;
+
+  function linkApp(port) {
+    appPort = port;
+    port.onmessage = function (ev) {
+      var d = ev.data || {};
+      if (d.type === 'scan') openScan(d.kind);
+    };
+    port.postMessage({ type: 'caps', scan: true });
+  }
+
+  function openScan(kind) {
+    closeScan();
+    scanFrame = document.createElement('iframe');
+    scanFrame.setAttribute('allow', 'camera');
+    scanFrame.title = 'QR 스캔';
+    scanFrame.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;z-index:20;background:#000';
+    scanFrame.src = 'scan.html?embed=1&kind=' + encodeURIComponent(kind || '');
+    document.body.appendChild(scanFrame);
+  }
+
+  function closeScan() {
+    if (scanFrame) { scanFrame.remove(); scanFrame = null; }
+  }
+
+  window.addEventListener('message', function (e) {
+    if (e.origin !== location.origin || !scanFrame || e.source !== scanFrame.contentWindow) return;
+    var d = e.data || {};
+    if (d.type === 'ems-scan') {
+      closeScan();
+      if (appPort) appPort.postMessage({ type: 'scan-result', code: String(d.code || '') });
+    } else if (d.type === 'ems-scan-cancel') {
+      closeScan();
+      if (appPort) appPort.postMessage({ type: 'scan-cancel' });
+    }
+  });
+
   var msg = document.getElementById('bootMsg');
   function tell(t) { if (msg && !booted) msg.textContent = t; }
-  setTimeout(function () { tell('구글 서버를 깨우는 중입니다…'); }, 4000);
-  setTimeout(function () { tell('조금만 더 기다려 주세요…'); }, 10000);
 
   var baseSrc = APP_URL + '?' + q.toString();
-  f.src = baseSrc;
 
-  /* ---------- 앱이 끝내 안 뜰 때 ----------
-     크롬에 구글 계정이 여러 개 로그인돼 있으면 /macros/s/ 주소가 엉뚱한 계정으로 붙어
-     구글 컨테이너가 "현재 파일을 열 수 없습니다" 를 대신 그린다(2026-09-02, 안드로이드에서 확인).
-     시크릿 창에서는 로그인이 없어 그냥 열린다 — 앱이나 배포 문제가 아니다.
-
-     우리가 안에서 무엇이 그려졌는지 읽을 수는 없다(다른 출처). 그래서 신호가 안 오는 것으로만 안다.
-     한 번은 계정을 지정해 다시 해 보고, 그래도 안 오면 사람이 할 수 있는 것을 보여 준다. */
-  // 어느 자리(authuser)가 맞는지는 기기·계정 순서마다 다르다. 두 번까지 바꿔 가며 해 본다.
-  // 로그아웃하지 않고 넘어갈 수 있는 유일한 길이라 자동으로 시도한다.
-  var tries = ['&authuser=0', '&authuser=1'];
-  function retryAt(i, ms) {
-    setTimeout(function () {
-      if (booted || i >= tries.length) return;
-      tell('다른 구글 계정으로 다시 열어 봅니다…');
-      f.src = baseSrc + tries[i];
-    }, ms);
+  function openApp(cl) {
+    var my = ++attempt;
+    alive = false;
+    usedCl = cl;
+    var n = document.createElement('iframe');
+    n.id = 'app';
+    n.title = f.title;
+    n.setAttribute('allow', f.getAttribute('allow') || '');
+    if (cl) n.setAttribute('credentialless', '');
+    // load 는 구글 바깥 페이지가 뜬 것이고, 우리 앱 문서는 그 뒤에 구글 스크립트가 붙인다(doGet 3~6초).
+    // 처음에 load + 3초로 판정했더니 로그인 없는 창에서도 늘 실패로 봤다. 넉넉히 12초를 준다. (2026-09-14)
+    n.addEventListener('load', function () {
+      setTimeout(function () { if (my === attempt && !alive) failed(); }, 12000);
+    });
+    startedAt = Date.now();
+    f.parentNode.replaceChild(n, f);
+    f = n;
+    f.src = baseSrc;
+    // load 조차 안 오는 경우(망이 느리거나 막힘)
+    setTimeout(function () { if (my === attempt && !alive) failed(); }, 25000);
+    setTimeout(function () { if (my === attempt) tell('구글 서버를 깨우는 중입니다…'); }, 4000);
+    setTimeout(function () { if (my === attempt) tell('조금만 더 기다려 주세요…'); }, 10000);
   }
-  retryAt(0, 15000);
-  retryAt(1, 24000);
 
-  setTimeout(function () {
+  function failed() {
     if (booted) return;
+    if (!usedCl && clSupported) {
+      tell('다시 여는 중입니다…');
+      return openApp(true);
+    }
+    try { localStorage.removeItem(CL_KEY); } catch (err) {}
+    showFail();
+  }
+
+  function showFail() {
     var b = document.getElementById('boot');
     if (!b) return;
     b.innerHTML =
@@ -147,7 +222,9 @@
     if (d) { d.href = baseSrc; d.target = '_blank'; d.rel = 'noopener'; }
     var a = document.getElementById('again');
     if (a) a.onclick = function () { location.reload(); };
-  }, 33000);
+  }
+
+  openApp(clSupported && clRemembered());
 
   // 주소에 실려 온 표(t)·QR 값은 앱에 넘긴 뒤 지운다.
   // 홈 화면 아이콘은 '추가' 하는 순간의 주소가 굳으므로, 지금 아이콘을 만들어도
